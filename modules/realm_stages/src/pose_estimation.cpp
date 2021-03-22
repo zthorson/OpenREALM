@@ -3,6 +3,7 @@
 #define LOGURU_WITH_STREAMS 1
 
 #include <realm_stages/pose_estimation.h>
+#include <realm_core/conversions.h>
 
 using namespace realm;
 using namespace stages;
@@ -19,6 +20,11 @@ PoseEstimation::PoseEstimation(const StageSettings::Ptr &stage_set,
       m_set_all_frames_keyframes((*stage_set)["set_all_frames_keyframes"].toInt() > 0),
       m_strategy_fallback(PoseEstimation::FallbackStrategy((*stage_set)["fallback_strategy"].toInt())),
       m_use_fallback(false),
+      m_use_average_offset_fallback(false),
+      m_avg_vslam_offset_window((*stage_set)["fallback_avg_window"].toInt()),
+      m_avg_vlsam_offset(0, 0, 0, 0, 0, 'T'),
+      m_avg_vslam_orientation_offset(cv::Mat::eye(3, 3, CV_64F)),
+      m_avg_vslam_offset_cnt(0),
       m_use_initial_guess((*stage_set)["use_initial_guess"].toInt() > 0),
       m_do_update_georef((*stage_set)["update_georef"].toInt() > 0),
       m_do_delay_keyframes((*stage_set)["do_delay_keyframes"].toInt() > 0),
@@ -101,10 +107,17 @@ void PoseEstimation::evaluateFallbackStrategy(PoseEstimation::FallbackStrategy s
     case FallbackStrategy::ALWAYS:
       LOG_F(INFO, "Selected: ALWAYS - Images will be projected whenever tracking is lost.");
       m_use_fallback = true;
+      m_use_average_offset_fallback = false;
       break;
     case FallbackStrategy::NEVER:
       m_use_fallback = false;
+      m_use_average_offset_fallback = false;
       LOG_F(INFO, "Selected: NEVER - Image projection will not be used.");
+      break;
+    case FallbackStrategy::ALWAYS_AVERAGE:
+      LOG_F(INFO, "Selected: ALWAYS_AVERAGE - Images will be projected whenever tracking is lose using average offset from previously tracked frames.");
+      m_use_fallback = true;
+      m_use_average_offset_fallback = true;
       break;
     default:
       throw(std::invalid_argument("Error: Unknown fallback strategy!"));
@@ -327,6 +340,11 @@ void PoseEstimation::reset()
   // Reset georeferencing
   if (m_use_vslam)
     m_georeferencer.reset(new GeometricReferencer(m_th_error_georef, m_min_nrof_frames_georef));
+
+  // Reset averages
+  if (m_use_average_offset_fallback)
+    m_avg_vslam_offset_cnt = 0;
+
   m_stage_publisher->requestReset();
   m_is_georef_initialized = false;
   m_reset_requested = false;
@@ -381,6 +399,8 @@ void PoseEstimation::printSettingsToLog()
   LOG_F(INFO, "### Stage process settings ###");
   LOG_F(INFO, "- use_vslam: %i", m_use_vslam);
   LOG_F(INFO, "- use_fallback: %i", m_use_fallback);
+  LOG_F(INFO, "- use_average_offset_fallback: %i", m_use_average_offset_fallback);
+  LOG_F(INFO, "- average_offset_window: %i", m_avg_vslam_offset_window);
   LOG_F(INFO, "- do_update_georef: %i", m_do_update_georef);
   LOG_F(INFO, "- do_suppress_outdated_pose_pub: %i", m_do_suppress_outdated_pose_pub);
   LOG_F(INFO, "- th_error_georef: %4.2f", m_th_error_georef);
@@ -509,6 +529,7 @@ void PoseEstimation::applyGeoreferenceToBuffer()
 
 cv::Mat PoseEstimation::computeInitialPoseGuess(const Frame::Ptr &frame)
 {
+  // TODO: Pull the default pose from the camera frame if it is set to give better initial conditions
   cv::Mat default_pose = frame->getDefaultPose();
   cv::Mat T_w2g = m_georeferencer->getTransformation();
   T_w2g.pop_back();
@@ -547,13 +568,62 @@ cv::Mat PoseEstimation::computeInitialPoseGuess(const Frame::Ptr &frame)
 
 void PoseEstimation::printGeoReferenceInfo(const Frame::Ptr &frame)
 {
-  UTMPose utm = frame->getGnssUtm();
-  cv::Mat t = frame->getCamera()->t();
+    UTMPose utm = frame->getGnssUtm();
+    cv::Mat t = frame->getCamera()->t();
 
-  LOG_F(INFO, "Georeferenced pose:");
-  LOG_F(INFO, "GNSS: [%10.2f, %10.2f, %4.2f]", utm.easting, utm.northing, utm.altitude);
-  LOG_F(INFO, "Visual: [%10.2f, %10.2f, %4.2f]", t.at<double>(0), t.at<double>(1), t.at<double>(2));
-  LOG_F(INFO, "Diff: [%10.2f, %10.2f, %4.2f]", utm.easting-t.at<double>(0), utm.northing-t.at<double>(1), utm.altitude-t.at<double>(2));
+    LOG_F(INFO, "Georeferenced pose:");
+    LOG_F(INFO, "GNSS: [%10.2f, %10.2f, %4.2f %6.1f]", utm.easting, utm.northing, utm.altitude,
+          pose::getHeadingFromOrientation(frame->getDefaultPose()));
+    LOG_F(INFO, "Visual: [%10.2f, %10.2f, %4.2f, %6.1f]", t.at<double>(0), t.at<double>(1), t.at<double>(2),
+          pose::getHeadingFromOrientation(frame->getCamera()->R()));
+    LOG_F(INFO, "Diff: [%10.2f, %10.2f, %4.2f, %6.1f]", utm.easting-t.at<double>(0), utm.northing-t.at<double>(1), utm.altitude-t.at<double>(2),
+          pose::getHeadingFromOrientation(frame->getDefaultPose()) - pose::getHeadingFromOrientation(frame->getCamera()->R()));
+}
+
+void PoseEstimation::updateGeoreferencedDifference(const Frame::Ptr &frame)
+{
+  // Update average using a rolling window with exponential decay of those elements outside the window
+  // This should be good enough for this application, and allows us to simply track the current and average states.
+  if (frame->hasAccuratePose() && frame->isGeoreferenced())
+  {
+    UTMPose utm = frame->getGnssUtm();
+    cv::Mat t = frame->getCamera()->t();
+
+    double gnss_heading = pose::getHeadingFromOrientation(frame->getDefaultPose());
+    double vslam_heading = pose::getHeadingFromOrientation(frame->getCamera()->R());
+
+    if (m_avg_vslam_offset_cnt == 0)
+    {
+        m_avg_vlsam_offset.zone = utm.zone;
+        m_avg_vlsam_offset.band = utm.band;
+        m_avg_vlsam_offset.easting = utm.easting - t.at<double>(0);
+        m_avg_vlsam_offset.northing = utm.northing - t.at<double>(1);
+        m_avg_vlsam_offset.altitude = utm.altitude - t.at<double>(2);
+        m_avg_vslam_orientation_offset = pose::computeOrientationFromHeading(gnss_heading - vslam_heading);
+    }
+    else
+    {
+        int window_size = std::min(m_avg_vslam_offset_window, m_avg_vslam_offset_cnt);
+        m_avg_vlsam_offset.easting = m_avg_vlsam_offset.easting + ((utm.easting - t.at<double>(0)) - m_avg_vlsam_offset.easting ) / window_size;
+        m_avg_vlsam_offset.northing = m_avg_vlsam_offset.northing + ((utm.northing - t.at<double>(1)) - m_avg_vlsam_offset.northing ) / window_size;
+        m_avg_vlsam_offset.altitude = m_avg_vlsam_offset.altitude + ((utm.altitude - t.at<double>(2)) - m_avg_vlsam_offset.altitude ) / window_size;
+
+        double new_offset = gnss_heading - vslam_heading;
+        double cur_offset = pose::getHeadingFromOrientation(m_avg_vslam_orientation_offset);
+        double new_avg_heading = cur_offset + (new_offset - cur_offset) / window_size;
+        m_avg_vslam_orientation_offset = pose::computeOrientationFromHeading(new_avg_heading);
+    }
+    m_avg_vslam_offset_cnt++;
+
+    LOG_F(INFO, "Avg Diff: [%10.2f, %10.2f, %4.2f, %6.1f ] (%d samples)",
+          m_avg_vlsam_offset.easting, m_avg_vlsam_offset.northing, m_avg_vlsam_offset.altitude,
+          pose::getHeadingFromOrientation(m_avg_vslam_orientation_offset), m_avg_vslam_offset_cnt);
+  }
+
+  // Don't start applying these offsets until we have at least "window" samples
+  if (m_avg_vslam_offset_cnt > m_avg_vslam_offset_window) {
+      frame->setImprovedPose(m_avg_vlsam_offset, m_avg_vslam_orientation_offset);
+  }
 }
 
 PoseEstimationIO::PoseEstimationIO(PoseEstimation* stage, double rate, bool do_delay_keyframes)
@@ -678,6 +748,10 @@ void PoseEstimationIO::publishFrame(const Frame::Ptr &frame)
 
   publishSparseCloud(frame);
 
+  // If we are tracking the average offset, update it now
+  if (m_stage_handle->m_use_average_offset_fallback) {
+      m_stage_handle->updateGeoreferencedDifference(frame);
+  }
   m_stage_handle->m_transport_frame(frame, "output/frame");
   m_stage_handle->printGeoReferenceInfo(frame);
 

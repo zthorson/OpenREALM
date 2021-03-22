@@ -2,7 +2,7 @@
 
 #include <realm_io/exif_import.h>
 #include <realm_core/timer.h>
-
+#include <realm_core/conversions.h>
 #include <realm_core/loguru.h>
 
 namespace realm
@@ -91,7 +91,7 @@ Frame::Ptr io::Exiv2FrameReader::loadFrameFromExiv2(const std::string &camera_id
     if (!readMetaTagTimestamp(exif_data, xmp_data, &timestamp_val))
       timestamp_val = Timer::getCurrentTimeMilliseconds();
 
-    return std::make_shared<Frame>(camera_id, frame_id, timestamp_val, img, utm, cam, computeOrientationFromHeading(utm.heading));
+    return std::make_shared<Frame>(camera_id, frame_id, timestamp_val, img, utm, cam, pose::computeOrientationFromHeading(utm.heading));
   }
   return nullptr;
 }

@@ -241,6 +241,15 @@ class Frame
     void setVisualPose(const cv::Mat &pose);
 
     /*!
+     * @brief Improve the pose by adding a location/attitude offset.  This is typically based on previous VSLAM input
+     *        and only used if tracking is lost.
+     * @param utm_offset The offset in lan/lon/alt to adjust the position of the image by
+     * @param orientation_offset A rotation matrix representing the attitude offset to adjust the projection by
+     *                           Note: Only yaw is currently supported
+     */
+    void setImprovedPose(const UTMPose& utm_offset, const cv::Mat& orientation_offset);
+
+    /*!
      * @brief Setter for surface points, e.g. the sparse cloud observed by the frame. Usually it is computed by the
      *        visual SLAM.
      * @param sparse_cloud 3D point cloud observed by this frame. Besides camera pose this is the most important parameter
@@ -280,6 +289,12 @@ class Frame
      *        meaningful, e.g. visual dense reconstruction.
      */
     void setPoseAccurate(bool flag);
+
+    /*!
+     * @brief Call to set this frames pose as an improved estimate.  Usually done by applying an offset to the GNSS pose
+     * averaged from previously tracked frames.
+     */
+    void setPoseImproved(bool flag);
 
     /*!
      * @brief Setter for surface assumption. Default is PLANAR, but as soon as surface generation computed a 2.5D
@@ -353,6 +368,12 @@ class Frame
    */
     bool hasAccuratePose() const;
 
+    /*!
+     * @brief Getter to check if frame has an estimated offset to improve the default GNSS localization
+     * @return true if yes
+     */
+    bool hasImprovedPose() const;
+
   private:
 
     /**###########################
@@ -376,6 +397,9 @@ class Frame
 
     //! Flag if frame as accurately computed pose (therefore pose is not default)
     bool m_has_accurate_pose;
+
+    //! Flag if the frame estimate has been improved by an offset from GNSS location/attitude
+    bool m_has_improved_pose;
 
     //! Flag for surface assumption. Default: PLANAR
     SurfaceAssumption m_surface_assumption;

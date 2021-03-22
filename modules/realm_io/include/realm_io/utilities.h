@@ -85,14 +85,6 @@ std::vector<std::string> split(const char *str, char c = ' ');
  */
 std::vector<std::string> getFileList(const std::string& dir, const std::string &suffix = "");
 
-/*! TODO: Einbaurichtung implementieren?
- * @brief Function to compute a 3x3 rotation matrix based on heading data. It is assumed, that the camera is pointing
- * downwards and the heading roughly aligns with the camera's yaw axis.
- * @param heading Magnetic heading of the camera / UAV
- * @return 3x3 rotation matrix
- */
-cv::Mat computeOrientationFromHeading(double heading);
-
 }
 }
 

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <realm_core/frame.h>
+#include <realm_core/conversions.h>
 
 namespace realm
 {
@@ -21,6 +22,7 @@ Frame::Frame(const std::string &camera_id,
       m_is_img_resizing_set(false),
       m_is_depth_computed(false),
       m_has_accurate_pose(false),
+      m_has_improved_pose(false),
       m_surface_assumption(SurfaceAssumption::PLANAR),
       m_surface_model(nullptr),
       m_orthophoto(nullptr),
@@ -135,8 +137,32 @@ cv::Mat Frame::getImageRaw() const
   return m_img;
 }
 
-cv::Mat Frame::getDefaultPose() const
+void Frame::setImprovedPose(const UTMPose& utm_offset, const cv::Mat& orientation_offset)
 {
+    cv::Mat t = cv::Mat::zeros(3, 1, CV_64F);
+    t.at<double>(0) = m_utm.easting - utm_offset.easting;
+    t.at<double>(1) = m_utm.northing - utm_offset.northing;
+    t.at<double>(2) = m_utm.altitude - utm_offset.altitude;
+
+    // Now get the orientation locks.  For initial testing, we will only consider yaw
+    double new_yaw =
+            pose::getHeadingFromOrientation(m_orientation) - pose::getHeadingFromOrientation(orientation_offset);
+
+    cv::Mat new_pose = cv::Mat::eye(3, 4, CV_64F);
+    pose::computeOrientationFromHeading(new_yaw).copyTo(new_pose.rowRange(0, 3).colRange(0, 3));
+    t.col(0).copyTo(new_pose.col(3));
+
+    // Update our camera position estimate with the new offset
+    {
+        std::lock_guard<std::mutex> lock(m_mutex_cam);
+        m_camera_model->setPose(new_pose);
+        m_motion_c2g = new_pose;
+        setPoseImproved(true);
+    }
+}
+
+cv::Mat Frame::getDefaultPose() const {
+
   // Translation set to measured utm coordinates
   cv::Mat t = cv::Mat::zeros(3, 1, CV_64F);
   t.at<double>(0) = m_utm.easting;
@@ -198,9 +224,10 @@ cv::Mat Frame::getPose() const
   // If frame pose is accurate, then two options exist:
   // 1) Pose is accurate and georeference was computed -> return motion in the geographic frame
   // 2) Pose is accurate but georeference was not computed -> return motion in visual world frame
-  // If frame pose is not accurate, then return the default pose based on GNSS and heading
+  // If frame pose is not accurate, but we have an improved estimate from prior vslam data, then return that
+  // Otherwise return the default pose based on GNSS and heading
 
-  if (hasAccuratePose())
+  if (hasAccuratePose() || hasImprovedPose())
   {
     // Option 1+2: Cameras pose is always uptodate
     return m_camera_model->pose();
@@ -353,6 +380,12 @@ void Frame::setPoseAccurate(bool flag)
   m_has_accurate_pose = flag;
 }
 
+void Frame::setPoseImproved(bool flag)
+{
+  std::lock_guard<std::mutex> lock(m_mutex_flags);
+  m_has_improved_pose = flag;
+}
+
 void Frame::setSurfaceAssumption(SurfaceAssumption assumption)
 {
   std::lock_guard<std::mutex> lock(m_mutex_flags);
@@ -408,6 +441,11 @@ bool Frame::hasAccuratePose() const
   return m_has_accurate_pose;
 }
 
+bool Frame::hasImprovedPose() const {
+    std::lock_guard<std::mutex> lock(m_mutex_flags);
+    return m_has_improved_pose;
+}
+
 std::string Frame::print()
 {
   std::lock_guard<std::mutex> lock(m_mutex_flags);
@@ -419,6 +457,7 @@ std::string Frame::print()
           m_utm.easting, m_utm.northing, m_utm.altitude, m_utm.heading);
   sprintf(buffer + strlen(buffer), "Is key frame: %s\n", (m_is_keyframe ? "yes" : "no"));
   sprintf(buffer + strlen(buffer), "Has accurate pose: %s\n", (m_has_accurate_pose ? "yes" : "no"));
+  sprintf(buffer + strlen(buffer), "Has estimated pose: %s\n", (m_has_improved_pose ? "yes" : "no"));
   std::lock_guard<std::mutex> lock1(m_mutex_cam);
   cv::Mat pose = getPose();
   if (!pose.empty())
