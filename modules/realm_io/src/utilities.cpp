@@ -124,22 +124,3 @@ std::vector<std::string> io::getFileList(const std::string& dir, const std::stri
   std::sort(filenames.begin(), filenames.end());
   return filenames;
 }
-
-cv::Mat io::computeOrientationFromHeading(double heading)
-{
-  // Rotation to the world in camera frame
-  cv::Mat R_wc = cv::Mat::eye(3, 3, CV_64F);
-  R_wc.at<double>(1, 1) = -1;
-  R_wc.at<double>(2, 2) = -1;
-
-  // Rotation around z considering uav heading
-  double gamma = heading * M_PI / 180;
-  cv::Mat R_wc_z = cv::Mat::eye(3, 3, CV_64F);
-  R_wc_z.at<double>(0, 0) = cos(-gamma);
-  R_wc_z.at<double>(0, 1) = -sin(-gamma);
-  R_wc_z.at<double>(1, 0) = sin(-gamma);
-  R_wc_z.at<double>(1, 1) = cos(-gamma);
-  cv::Mat R = R_wc_z * R_wc;
-
-  return R;
-}

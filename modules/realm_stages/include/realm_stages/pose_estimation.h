@@ -44,7 +44,8 @@ class PoseEstimation : public StageBase
     enum class FallbackStrategy
     {
       ALWAYS,               // Use this strategy, only, when provided orientation in the frame aligns with the camera orientation
-      NEVER                 // Use this strategy, when you don't want fallback projection based on GPS coordinates only
+      NEVER,                // Use this strategy, when you don't want fallback projection based on GPS coordinates only
+      ALWAYS_AVERAGE,       // Use this strategy, will fallback to provided camera orientation adjusted by the average tracking offset (if tracking ever converged)
     };
 
     struct SaveSettings
@@ -97,6 +98,19 @@ class PoseEstimation : public StageBase
 
     // Flag to disable fallback solution based on lat/lon/alt/heading completely
     bool m_use_fallback;
+
+    // Flag to indicate we should use the average
+    bool m_use_average_offset_fallback;
+
+    // The window to average over before applying exponential falloff
+    int m_avg_vslam_offset_window;
+
+    // Stores the average vslam lat/lon/alt/heading offset from the reported image offsets
+    UTMPose m_avg_vlsam_offset;
+    cv::Mat m_avg_vslam_orientation_offset;
+
+    // Count of the number of vslam offset frames we have seen so far
+    int m_avg_vslam_offset_cnt;
 
     // Flag to disable using an initial guess of the camera pose to make tracking more stable in the visual SLAM
     bool m_use_initial_guess;
@@ -169,6 +183,7 @@ class PoseEstimation : public StageBase
 
     void applyGeoreferenceToBuffer();
     void printGeoReferenceInfo(const Frame::Ptr &frame);
+    void updateGeoreferencedDifference(const Frame::Ptr &frame);
     void pushToBufferNoPose(const Frame::Ptr &frame);
     void pushToBufferInit(const Frame::Ptr &frame);
     void pushToBufferAll(const Frame::Ptr &frame);
