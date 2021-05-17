@@ -105,6 +105,10 @@ class PoseEstimation : public StageBase
     // The window to average over before applying exponential falloff
     int m_avg_vslam_offset_window;
 
+    // The maximum number of lost frames when initializing before attempting a reset
+    int m_init_lost_frames_reset_count;
+    int m_init_lost_frames;
+
     // Stores the average vslam lat/lon/alt/heading offset from the reported image offsets
     UTMPose m_avg_vlsam_offset;
     cv::Mat m_avg_vslam_orientation_offset;
